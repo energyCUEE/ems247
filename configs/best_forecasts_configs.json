@@ -1,0 +1,10 @@
+{
+    "LGBM":{
+        "IR": "45b79af31b4d45e4b03f934eb5bb2ea5",
+        "PL": "9072c9181a1842b59b5ed8e204111e31"
+    },
+    "NNProphet":{
+        "IR": "4e07e7ce89c14b4aba2e5e7065e1e168",
+        "PL": "079bb4bb1b6e4b66bfa32e3b64268fd8"
+}
+}

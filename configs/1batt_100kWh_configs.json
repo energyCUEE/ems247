@@ -1,0 +1,11 @@
+{
+    "no_batts": 1,
+    "min_socs": [20],
+    "max_socs": [80],
+    "init_socs": [50],
+    "capacity": [100],
+    "max_charge_rates": [50],
+    "max_discharge_rates": [50],
+    "charge_effs": [0.95],
+    "discharge_effs": [0.8835]
+}
