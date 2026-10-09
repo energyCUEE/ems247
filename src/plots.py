@@ -17,6 +17,7 @@ color_dict = {
     'soc': 'violet',
     "Pnet_DA": 'cyan',
     "negPnet_DA": 'tab:blue',
+    "Psell_DA": 'tab:blue',
     'posPnet_DA': 'tab:purple',
     'Pgreen_DA': 'forestgreen',
     'Pnongreen_DA': 'tomato',
@@ -44,6 +45,7 @@ legend_name = {
     'Pnet_DA': 'Net power [kW]',
     'posPnet_DA': 'Imported power from grid [kW]',
     'negPnet_DA': 'Exported power [kW]',
+    'Psell_DA': 'Exported power [kW]',
     'Pgreen_DA': 'Green [kW]',
     'Pnongreen_DA': 'Non-green [kW]',
     'daily_nongreen_status': 'Non-green',
@@ -194,26 +196,30 @@ def plot_one_batch_one_green_operation(
         tick_fontsize=14,
         label_fontsize=16,
         legend_fontsize=14,
-        title_fontsize=16, 
-        case="sell"):
+        title_fontsize=16,
+        case="sell",
+        rt_scenario=None):
     """
     Plot one optimization batch (power flows, SOC, and operation status).
     Shows x-tick labels on both subplots.
+    rt_scenario: stochastic mode only, index of the scenario whose real-time
+    decisions ({var}_scenario_RT_{rt_scenario} columns) are added as dotted lines.
     """
 
     # Determine which columns to use
     if mode == 'prescient':
         y1st_1_cols = ['measured_Netload']
-    elif mode == 'deterministic':
+    elif mode in ('deterministic', 'stochastic'):
         y1st_1_cols = ['forecasted_Netload']
     else:
-        raise ValueError("mode must be 'prescient' or 'deterministic'")
+        raise ValueError("mode must be 'prescient', 'deterministic' or 'stochastic'")
     y1st_1_cols.extend(['Pchg', 'Pdchg'])
     y2nd_1_cols = ['soc']
-    y1st_2_cols = ['Pgreen_DA', 'Pnongreen_DA', 'negPnet_DA']
+    export_col = 'Psell_DA' if mode == 'stochastic' else 'negPnet_DA'
+    y1st_2_cols = ['Pgreen_DA', 'Pnongreen_DA', export_col]
     y2nd_2_cols = ['daily_nongreen_status']
 
-    
+
 
     # Create two subplots sharing the x-axis
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True, constrained_layout=True)
@@ -247,27 +253,34 @@ def plot_one_batch_one_green_operation(
     # Second subplot (dispatch + status)
     ax2_1 = ax2
     for col in y1st_2_cols: # Plot postPnet as dash line
-        if col == 'negPnet_DA':
+        if col == export_col:
             ax2_1.plot(result_df.index, result_df[col], label=legend_name_use[col], color=color_dict[col], linestyle='--', linewidth=0.8)
         else:
             ax2_1.plot(result_df.index, result_df[col], label=legend_name_use[col], color=color_dict[col], linewidth=0.8)
 
+    # Real-time (2nd-stage) decisions of one stochastic scenario as dotted lines, colored like their DA counterparts
+    if rt_scenario is not None:
+        for rt_var, da_col in (('Pgreen', 'Pgreen_DA'), ('Pnongreen', 'Pnongreen_DA'), ('Psell', export_col)):
+            ax2_1.plot(result_df.index, result_df[f'{rt_var}_scenario_RT_{rt_scenario}'],
+                       label=legend_name_use[da_col].replace(' [kW]', f' RT, scenario {rt_scenario} [kW]'),
+                       color=color_dict[da_col], linestyle=':', linewidth=0.8)
+
     # fill the background color for both non-green and green areas
     green_status = result_df['daily_green_status'] if 'daily_green_status' in result_df.columns else 1 - result_df['daily_nongreen_status']
-    
+
     # fill green
-    ax1_1.fill_between(result_df.index, 
-                       y1 = result_df[y1st_1_cols].min().min(),
-                       y2 = result_df[y1st_1_cols].max().max(),
+    ax1_1.fill_between(result_df.index,
+                       y1=0,  # axes fraction (x-axis transform): full-height band
+                       y2=1,
                        where=(green_status ==1),
                        transform=ax1_1.get_xaxis_transform(),
                        interpolate=True,
                           color='lightgreen',
                             alpha=0.15,
                             label='_nolegend_')
-    ax2_1.fill_between(result_df.index, 
-                       y1 = result_df[y1st_2_cols].min().min(),
-                       y2 = result_df[y1st_2_cols].max().max(),
+    ax2_1.fill_between(result_df.index,
+                       y1=0,  # axes fraction (x-axis transform): full-height band
+                       y2=1,
                        where=(green_status ==1),
                        transform=ax2_1.get_xaxis_transform(),
                        interpolate=True,
@@ -276,8 +289,8 @@ def plot_one_batch_one_green_operation(
                             label='_nolegend_')
     # fill non-green
     ax1_1.fill_between(result_df.index,
-                          y1 = result_df[y1st_1_cols].min().min(),
-                          y2 = result_df[y1st_1_cols].max().max(),
+                          y1=0,  # axes fraction (x-axis transform): full-height band
+                          y2=1,
                           where=(green_status ==0),
                           transform=ax1_1.get_xaxis_transform(),
                           interpolate=True,
@@ -285,8 +298,8 @@ def plot_one_batch_one_green_operation(
                              alpha=0.15,
                              label='_nolegend_')
     ax2_1.fill_between(result_df.index,
-                          y1 = result_df[y1st_2_cols].min().min(),
-                          y2 = result_df[y1st_2_cols].max().max(),
+                          y1=0,  # axes fraction (x-axis transform): full-height band
+                          y2=1,
                           where=(green_status ==0),
                           transform=ax2_1.get_xaxis_transform(),
                           interpolate=True,
@@ -325,7 +338,7 @@ def plot_one_batch_one_green_operation(
     ax2_1.legend(lines_3, labels_3,
                 fontsize=legend_fontsize,
                 loc='upper center',
-                bbox_to_anchor=(0.5, -0.25),
+                bbox_to_anchor=(0.5, -0.25 if rt_scenario is None else -0.35),  # wider RT legend: clear the date label
                 ncol=2,
                 frameon=False)
 
@@ -353,6 +366,175 @@ def plot_one_batch_one_green_operation(
         
 
     return fig
+
+def plot_combined_one_green_operations(
+        result_dfs,
+        net_costs=None,
+        n_RE_days_list=None,
+        subtitles=None,
+        mode='deterministic',
+        figsize=(12, 18),
+        tick_fontsize=12,
+        label_fontsize=14,
+        legend_fontsize=12,
+        title_fontsize=14,
+        case="sell"):
+    """
+    Plot multiple optimization batches as subfigures in one figure.
+    Each batch gets two rows (power+SOC and dispatch), with a subtitle on top.
+
+    Parameters
+    ----------
+    result_dfs : list of DataFrame
+        Each element is the result_df for one scenario.
+    net_costs : list of float, optional
+        Net cost for each scenario. Used to auto-generate subtitles.
+    n_RE_days_list : list of int, optional
+        Number of CF days for each scenario. Used to auto-generate subtitles.
+    subtitles : list of str, optional
+        Explicit subtitles. If provided, overrides auto-generation from
+        net_costs / n_RE_days_list.
+    """
+
+    n = len(result_dfs)
+    if subtitles is None:
+        subtitles = []
+        for i in range(n):
+            letter = chr(ord('a') + i)
+            rd = n_RE_days_list[i] if n_RE_days_list is not None else i + 1
+            if net_costs is not None:
+                subtitles.append(
+                    f"({letter}) {rd} CF day{'s' if rd > 1 else ''} (cost = {net_costs[i]:.0f} THB)")
+            else:
+                subtitles.append(f"({letter})")
+
+    # Determine which columns to use
+    if mode == 'prescient':
+        y1st_1_cols = ['measured_Netload']
+    elif mode == 'deterministic':
+        y1st_1_cols = ['forecasted_Netload']
+    else:
+        raise ValueError("mode must be 'prescient' or 'deterministic'")
+    y1st_1_cols.extend(['Pchg', 'Pdchg'])
+    y2nd_1_cols = ['soc']
+    y1st_2_cols = ['Pgreen_DA', 'Pnongreen_DA', 'negPnet_DA']
+
+    if case == "nosell":
+        legend_name_use = legend_name_nosell
+    else:
+        legend_name_use = legend_name
+
+    # 2 rows per scenario
+    fig, axes = plt.subplots(2 * n, 1, figsize=figsize, constrained_layout=True)
+    if n == 1:
+        axes = [axes]  # ensure iterable
+
+    for i, (result_df, subtitle) in enumerate(zip(result_dfs, subtitles)):
+        ax_top = axes[2 * i]
+        ax_bot = axes[2 * i + 1]
+
+        # ---------- Top subplot: Power + SOC ----------
+        ax1_1 = ax_top
+        ax1_2 = ax_top.twinx()
+
+        for col in y1st_1_cols:
+            ax1_1.plot(result_df[col], label=legend_name_use[col], color=color_dict[col], linewidth=0.8)
+        for col in y2nd_1_cols:
+            ax1_2.plot(result_df[col], label=legend_name_use[col], color=color_dict[col], linewidth=0.8)
+
+        ax1_1.set_ylabel('Power [kW]', fontsize=label_fontsize)
+        ax1_2.set_ylabel(r'SoC [%]', fontsize=label_fontsize)
+        ax1_1.tick_params(axis='y', labelsize=tick_fontsize)
+        ax1_2.tick_params(axis='y', labelsize=tick_fontsize)
+
+        ax1_2.set_ylim(result_df['soc'].min(), result_df['soc'].max())
+        ax1_2.axhline(20, color='gray', linestyle='--', linewidth=0.8)
+        ax1_2.axhline(80, color='gray', linestyle='--', linewidth=0.8)
+
+        # ---------- Bottom subplot: dispatch ----------
+        ax2_1 = ax_bot
+        for col in y1st_2_cols:
+            if col == 'negPnet_DA':
+                ax2_1.plot(result_df.index, result_df[col], label=legend_name_use[col],
+                           color=color_dict[col], linestyle='--', linewidth=0.8)
+            else:
+                ax2_1.plot(result_df.index, result_df[col], label=legend_name_use[col],
+                           color=color_dict[col], linewidth=0.8)
+
+        # fill background green / non-green
+        green_status = (result_df['daily_green_status']
+                        if 'daily_green_status' in result_df.columns
+                        else 1 - result_df['daily_nongreen_status'])
+
+        for ax, cols in [(ax1_1, y1st_1_cols), (ax2_1, y1st_2_cols)]:
+            ax.fill_between(result_df.index,
+                            y1=0,  # axes fraction (x-axis transform): full-height band
+                            y2=1,
+                            where=(green_status == 1),
+                            transform=ax.get_xaxis_transform(),
+                            interpolate=True, color='lightgreen', alpha=0.15, label='_nolegend_')
+            ax.fill_between(result_df.index,
+                            y1=0,  # axes fraction (x-axis transform): full-height band
+                            y2=1,
+                            where=(green_status == 0),
+                            transform=ax.get_xaxis_transform(),
+                            interpolate=True, color='lightcoral', alpha=0.15, label='_nolegend_')
+
+        ax2_1.set_ylabel('Power [kW]', fontsize=label_fontsize)
+        ax2_1.tick_params(axis='y', labelsize=tick_fontsize)
+
+        # xticks (every 12 hrs from 15-min interval)
+        x_ticks_index = result_df.index[::48]
+        noon_time_index = [48 + j * 96 for j in range(len(result_df) // 96)]
+        labels = []
+        for x in x_ticks_index:
+            dt = result_df['Datetime'].iloc[x]
+            if x == 0:
+                labels.append(f"\n{dt.strftime('%d%b%y')}")
+            elif x in noon_time_index:
+                labels.append(dt.strftime('%H%p'))
+            else:
+                labels.append('')
+
+        ax2_1.set_xticks(x_ticks_index)
+        ax2_1.set_xticklabels(labels, fontsize=tick_fontsize)
+        for label in ax2_1.get_xticklabels():
+            label.set_ha('center')
+            label.set_va('top')
+            label.set_linespacing(1.5)
+        ax2_1.tick_params(axis='x', labelsize=tick_fontsize)
+
+        # hide x-tick labels on the top row of each pair
+        ax1_1.tick_params(axis='x', labelbottom=False)
+
+        # grids
+        ax1_1.grid(visible=True, which='both', axis='x', linestyle='--', linewidth=0.5)
+        ax2_1.grid(visible=True, which='both', axis='x', linestyle='--', linewidth=0.5)
+
+        # legends — on every scenario
+        lines_1, labels_1 = ax1_1.get_legend_handles_labels()
+        lines_2, labels_2 = ax1_2.get_legend_handles_labels()
+        ax1_1.legend(lines_1 + lines_2, labels_1 + labels_2,
+                     fontsize=legend_fontsize, loc='upper center',
+                     bbox_to_anchor=(0.5, -0.08), ncol=4, frameon=False, columnspacing=0.4)
+
+        lines_3, labels_3 = ax2_1.get_legend_handles_labels()
+        ax2_1.legend(lines_3, labels_3,
+                     fontsize=legend_fontsize, loc='upper center',
+                     bbox_to_anchor=(0.5, -0.38), ncol=3, frameon=False)
+
+        # spine styling
+        for axis in [ax1_1, ax1_2, ax2_1]:
+            for spine in axis.spines.values():
+                spine.set_linewidth(0.1)
+                spine.set_alpha(0.5)
+                spine.set_color('gray')
+
+        # subtitle above the top subplot of each pair
+        ax1_1.set_title(subtitle, fontsize=title_fontsize, fontweight='bold', pad=4, loc='center')
+
+    return fig
+
 def plot_one_batch_three_green_operations(
         result_df,
 
@@ -522,8 +704,8 @@ def plot_one_batch_three_green_operations(
     green_status = result_df['daily_green_status'] if 'daily_green_status' in result_df.columns else 1 - result_df['daily_nongreen_status']
     # fill green
     ax1_1.fill_between(result_df.index,
-                          y1 = result_df[y1st_1_cols].min().min(),
-                          y2 = result_df[y1st_1_cols].max().max(),
+                          y1=0,  # axes fraction (x-axis transform): full-height band
+                          y2=1,
                           where=(green_status ==1),
                           transform=ax1_1.get_xaxis_transform(),
                           interpolate=True,
@@ -531,8 +713,8 @@ def plot_one_batch_three_green_operations(
                              alpha=0.15,
                              label='_nolegend_')
     ax2_1.fill_between(result_df.index,
-                            y1 = result_df[y1st_2_cols].min().min(),
-                            y2 = result_df[y1st_2_cols].max().max(),
+                            y1=0,  # axes fraction (x-axis transform): full-height band
+                            y2=1,
                             where=(green_status ==1),
                             transform=ax2_1.get_xaxis_transform(),
                             interpolate=True,
@@ -541,8 +723,8 @@ def plot_one_batch_three_green_operations(
                                  label='_nolegend_')
     # fill non-green
     ax1_1.fill_between(result_df.index,
-                            y1 = result_df[y1st_1_cols].min().min(),
-                            y2 = result_df[y1st_1_cols].max().max(),
+                            y1=0,  # axes fraction (x-axis transform): full-height band
+                            y2=1,
                             where=(green_status ==0),
                             transform=ax1_1.get_xaxis_transform(),
                             interpolate=True,
@@ -550,8 +732,8 @@ def plot_one_batch_three_green_operations(
                                  alpha=0.15,
                                  label='_nolegend_')
     ax2_1.fill_between(result_df.index,
-                            y1 = result_df[y1st_2_cols].min().min(),
-                            y2 = result_df[y1st_2_cols].max().max(),
+                            y1=0,  # axes fraction (x-axis transform): full-height band
+                            y2=1,
                             where=(green_status ==0),
                             transform=ax2_1.get_xaxis_transform(),
                             interpolate=True,

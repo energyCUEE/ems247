@@ -1,0 +1,13 @@
+# Archived no-sell variants (kept locally, not tracked)
+archived/
+
+# Python / run artifacts
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+logs/
+*.lp
+gurobi.log
+
+# Experiment outputs (keep only the tracked top-level figures)
+results/*/

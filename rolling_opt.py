@@ -1,195 +1,146 @@
+"""
+One-day rolling-horizon EMS with a soft green-purchase budget.
+
+One run = one formulation (`mode` in the config: prescient, deterministic or
+stochastic), swept over n_RE_days (targeted CF days per horizon). For each
+planning date:
+  1. Soft green budget = green_purchase_volume_factor * forecasted load energy
+     over the horizon; exceeding it costs weight_green_slack per kWh.
+  2. Solve the horizon problem.
+  3. After WARMUP_DAYS, fix the first day's non-green status by an
+     exponentially weighted vote of today's solution and the earlier plans for
+     that same day, then re-solve.
+  4. Execute the first day; its end SoC becomes the next initial SoC.
+"""
 import os
 import json
-import pandas as pd
-import argparse
-import cvxpy as cp
-import numpy as np
-from src.re100_sp import BatteryParams, MeasurementData, ForecastData, RE100EMS
-import shutil
-from datetime import datetime
-import warnings
-warnings.filterwarnings("ignore")
 import time
+import argparse
+import warnings
+import numpy as np
+import pandas as pd
+import cvxpy as cp
+from src.re100_sp import BatteryParams, MeasurementData, ForecastData, RE100EMS
+from src.copula import DailyCopulaErrorModel
+warnings.filterwarnings("ignore")
+
+WARMUP_DAYS = 6            # use the unfixed solution until enough history exists
+LOOKBACK_N = 7             # number of votes (today + previous 6 plans)
+DECAY_RATE = 0.1
+CONSENSUS_THRESHOLD = 0.6
+VOTE_WEIGHTS = np.exp(-DECAY_RATE * np.arange(1, LOOKBACK_N + 1))
+VOTE_WEIGHTS /= VOTE_WEIGHTS.sum()
+
+
 def main(arg):
     with open(arg.optimization_configs_path, "r") as f:
-        optimization_configs = json.load(f)
-    # battery configs
-    with open(optimization_configs["battery_configs_path"], "r") as f:
+        cfg = json.load(f)
+    with open(cfg["battery_configs_path"], "r") as f:
         battery_configs = json.load(f)
 
-    battery = BatteryParams(**battery_configs)
-    n_points_1day = optimization_configs["n_points_1day"]
-    PV_cap_original = optimization_configs["PV_cap_original"]
-    Pv_cap_target = optimization_configs["Pv_cap_target"]
-    n_horizon_days = optimization_configs.get("n_horizon_days", 7)
-    
-    saved_path = arg.saved_path
-    os.makedirs(saved_path, exist_ok=True)
-    solve_mode = arg.solve_mode  # 'optimize' or 'plot'
-    continue_planning = arg.continue_planning
-    if continue_planning:
-        if not os.path.isdir(saved_path):
-            print("No existing results folder; starting from the beginning.")
-            start_planning_date = optimization_configs.get("start_planning_date", "2024-06-07")
-        else:
-            existing_files = [
-                f for f in os.listdir(saved_path)
-                if f.startswith('collected_rolling_result_up_to_') and f.endswith('.csv')
-            ]
-            if existing_files:
-                # pick the latest by date suffix
-                def extract_date(fname):
-                    s = fname.split('_up_to_')[-1].replace('.csv','')
-                    return pd.to_datetime(s, format='%Y-%m-%d', errors='coerce')
-                latest = max(existing_files, key=lambda x: extract_date(x))
-                last_planning_date = latest.split('_up_to_')[-1].replace('.csv', '')
-                print(f"Continuing planning from last planning date: {last_planning_date}")
-                start_planning_date = (pd.to_datetime(last_planning_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") # start from the day after the last planning date
-                collected_result_df = pd.read_csv(os.path.join(saved_path, latest))
-                collected_one_day_rolling_result_df = pd.read_csv(os.path.join(saved_path, f'one_day_rolling_result_up_to_{last_planning_date}.csv'))
-            else:
-                print("No existing results found, starting from the beginning.")
-                start_planning_date = optimization_configs.get("start_planning_date", "2024-06-07")
-       
-    else:
-        start_planning_date = optimization_configs.get("start_planning_date", "2024-06-07")
-        collected_result_df = pd.DataFrame() # to collect all results
-        collected_one_day_rolling_result_df = pd.DataFrame() # slice just for one-day rolling results which are the actual actions taken
-    end_planning_date = optimization_configs.get("end_planning_date", "2025-05-07")
-    planning_dates = pd.date_range(start=start_planning_date, end=end_planning_date, freq='D').strftime('%Y-%m-%d').tolist()
-    # read measurement data
-    full_solar_df = pd.read_csv(optimization_configs["solar_measurement_df_path"], parse_dates=['Datetime'])
-    full_load_df = pd.read_csv(optimization_configs["load_measurement_df_path"], parse_dates=['Datetime']).rename(columns={'L':'PL'})
+    mode = cfg["mode"]
+    n_points_1day = cfg["n_points_1day"]
+    n_horizon_days = cfg.get("n_horizon_days", 7)
+    resolution_in_hour = 24 / n_points_1day
+    factor = cfg.get("green_purchase_volume_factor")  # null -> no green budget
+    weight_green_slack = cfg.get("weight_green_slack", 20)
 
+    full_solar_df = pd.read_csv(cfg["solar_measurement_df_path"], parse_dates=['Datetime'])
+    full_load_df = pd.read_csv(cfg["load_measurement_df_path"], parse_dates=['Datetime']).rename(columns={'L': 'PL'})
     measurement_data = MeasurementData(full_load_df=full_load_df, full_solar_df=full_solar_df)
-    price_df = pd.read_csv(optimization_configs["price_df_path"])
-    solar_exp_df = pd.read_csv(optimization_configs["solar_experiment_df_path"], parse_dates=['Date']).drop(columns=['y'])
-    load_exp_df = pd.read_csv(optimization_configs["load_experiment_df_path"], parse_dates=['Date']).drop(columns=['y'])
+    price_df = pd.read_csv(cfg["price_df_path"])
+    solar_exp_df = pd.read_csv(cfg["solar_experiment_df_path"], parse_dates=['Date']).drop(columns=['y'])
+    load_exp_df = pd.read_csv(cfg["load_experiment_df_path"], parse_dates=['Date']).drop(columns=['y'])
     forecast_data = ForecastData(exp_ir_df=solar_exp_df, exp_load_df=load_exp_df)
-    
+    copula_model = None
+    if mode == "stochastic":
+        copula_model = DailyCopulaErrorModel(pv_pipeline_path=cfg["pv_copula_pipeline_path"],
+                                             load_pipeline_path=cfg["load_copula_pipeline_path"])
 
-    terminal_socs = optimization_configs["terminal_socs"]
-    n_green_sources = optimization_configs["n_green_sources"]
-    green_allocation_quota = optimization_configs["green_allocation_quota"]
-    mode = optimization_configs["mode"]
-    n_realizations = optimization_configs.get("n_realizations")
-    extract_realizations = None
-    ir_pl_error_mean = np.load(optimization_configs.get("ir_pl_error_mean_path"))
-    ir_pl_error_cov = np.load(optimization_configs.get("ir_pl_error_cov_path"))
+    start_planning_date = arg.start_planning_date or cfg["start_planning_date"]
+    end_planning_date = arg.end_planning_date or cfg["end_planning_date"]
+    planning_dates = pd.date_range(start=start_planning_date, end=end_planning_date, freq='D').strftime('%Y-%m-%d').tolist()
+    os.makedirs(arg.saved_path, exist_ok=True)
 
-    last_saved_date = None
-    
-    if solve_mode == 'optimize':
-        count = 0
-        # Create list for store initial SOCs per each planning date
-        init_socs_list = [battery.init_socs[0].copy() for _ in range(n_horizon_days)] # at planning date one, the initial SOC are from the configs with the same value for all horizon days
-        start_time = datetime.now()
-        for planning_date in planning_dates:
-            planning_date_df = pd.DataFrame()
-            planning_date_one_day_rolling_df = pd.DataFrame()
-            # Vary the number of RE days from 1 to n_horizon_days
-            for n_RE_days in range(1, n_horizon_days+1):
-                # read battery configs again to reset initial SOCs
-                with open(optimization_configs["battery_configs_path"], "r") as f:
-                    battery_configs = json.load(f)
-                battery_configs['init_socs'] = [init_socs_list[n_RE_days-1]]  # set initial SOCs according to the number of RE days
-                battery = BatteryParams(**battery_configs)
-                print(f"{mode}, Planning date: {planning_date} for {n_RE_days} RE days")
-                one_batch_params = RE100EMS(
-                battery=battery,
+    for n_RE_days in arg.n_RE_days:
+        full_path = os.path.join(arg.saved_path, f"collected_rolling_result_{n_RE_days}REdays.csv")
+        one_day_path = os.path.join(arg.saved_path, f"one_day_rolling_result_{n_RE_days}REdays.csv")
+        for path in (full_path, one_day_path):
+            if os.path.exists(path):
+                os.remove(path)
+
+        init_soc = battery_configs["init_socs"][0]
+        plan_history = []  # executed u_normXnongreen_block per planning date
+        t_start = time.time()
+        for idx, planning_date in enumerate(planning_dates):
+            if factor is None:
+                green_quota, weight_slack = [np.inf], None
+            else:
+                forecasted_PL = forecast_data.get_forecasted_load(planning_date)
+                green_quota, weight_slack = [factor * forecasted_PL.sum() * resolution_in_hour], weight_green_slack
+
+            ems_kwargs = dict(
+                battery=BatteryParams(**{**battery_configs, "init_socs": [init_soc]}),
                 measurement_data=measurement_data,
                 forecast_data=forecast_data,
                 planning_date=planning_date,
                 n_points_1day=n_points_1day,
                 n_horizon_days=n_horizon_days,
-                n_RE_days=n_RE_days,
-                PV_cap_original=PV_cap_original,
-                PV_cap_target=Pv_cap_target,
+                CFE_block_size=n_points_1day,  # one CFE block = one day
+                n_CFE_blocks=n_RE_days,
+                PV_cap_original=cfg["PV_cap_original"],
+                PV_cap_target=cfg["Pv_cap_target"],
                 price_df=price_df,
-                terminal_socs=terminal_socs,
-                n_green_sources=n_green_sources,
-                green_allocation_quota=green_allocation_quota,
+                terminal_socs=cfg["terminal_socs"],
+                n_green_sources=1,
+                green_allocation_quota=green_quota,
+                weight_green_slack=weight_slack,
                 mode=mode,
-                n_realizations=n_realizations,
-                extract_realizations=extract_realizations,
-                ir_pl_error_mean=ir_pl_error_mean,
-                ir_pl_error_cov=ir_pl_error_cov
-                )
-                t0 = time.time()
-                
-                prob, result_df, fval, exit_flag = one_batch_params.optimize(solver=cp.GUROBI)
-                next_soc = prob.var_dict['soc'].value[n_points_1day] # use the first value of the next day as the initial SOC for the next planning date
-                result_df['planning_date'] = planning_date
-                result_df['n_RE_days'] = n_RE_days
-                # Concat result
-                planning_date_df = pd.concat([planning_date_df, result_df], ignore_index=True)
-                if (mode == 'prescient') and (planning_date == '2025-05-24'): # save nor just one day rolling in the last batch of prescient mode
-                    planning_date_one_day_rolling_df = pd.concat([planning_date_one_day_rolling_df, result_df], ignore_index=True)
-                else:
-                    planning_date_one_day_rolling_df = pd.concat([planning_date_one_day_rolling_df, result_df.iloc[:n_points_1day]], ignore_index=True)
-                
-                print("time taken (s): ", time.time() - t0)
-                print(f"n_RE_days: {n_RE_days}, fval: {fval}, exit_flag: {exit_flag}")
-                print(f"Cost in planning = {fval}, exit flag = {exit_flag}")
-                resolution_in_hour = 15/60  # 15 minutes resolution
-                imported_green_cols = [f'Pgreen_UGT{source_idx}_DA' for source_idx in range(1, n_green_sources+1)]
-                print(f"At planning date: {planning_date}")
-                print(f"PV capacity (kW): {Pv_cap_target:.2f} kW")
-                print(f"Battery capacity (kWh): {battery.capacity[0]:.2f} kWh")
-                print(f"with anticipated RE100 days: {n_RE_days} days from Horizon {n_horizon_days} days")
-                if mode != "stochastic":
-                    print(f"Imported green energy in planning (kWh): {result_df[imported_green_cols].sum().sum()*resolution_in_hour:.2f} kWh")
-                    for source_idx in range(1, n_green_sources+1):
-                        col_name = f'Pgreen_UGT{source_idx}_DA'
-                        print(f"  - from UGT{source_idx}: {result_df[col_name].sum()*resolution_in_hour:.2f} kWh")
-                print(f"The next initial SOCs for battery for next planning date: {next_soc}")
-                init_socs_list[n_RE_days-1] = next_soc  # update the initial SOCs for the next planning date
-            count += 1
-            collected_result_df = pd.concat([collected_result_df, planning_date_df], ignore_index=True)
-            collected_one_day_rolling_result_df = pd.concat([collected_one_day_rolling_result_df, planning_date_one_day_rolling_df], ignore_index=True)
-            # Saved result every 30 days
-            if count % 30 == 0:
-                os.makedirs(saved_path, exist_ok=True)
-                # Delete the old ones
-                if last_saved_date is not None:
-                    old_file_path = os.path.join(saved_path, f'collected_rolling_result_up_to_{last_saved_date}.csv')
-                    one_day_rolling_old_file_path = os.path.join(saved_path, f'one_day_rolling_result_up_to_{last_saved_date}.csv')
-                    print(f"Checking for old file to delete: {old_file_path}")
-                    if os.path.exists(old_file_path):
-                        os.remove(old_file_path)
-                        os.remove(one_day_rolling_old_file_path)
-                        print(f"Deleted old file: {old_file_path}")
-                        print(f"Deleted old file: {one_day_rolling_old_file_path}")
-                # Save the new ones
-                current_saved_date = planning_date
-                collected_result_df.to_csv(os.path.join(saved_path, f'collected_rolling_result_up_to_{current_saved_date}.csv'), index=False)
-                collected_one_day_rolling_result_df.to_csv(os.path.join(saved_path, f'one_day_rolling_result_up_to_{current_saved_date}.csv'), index=False)
-                last_saved_date = planning_date
-                print(f"last save at {datetime.now()}")
+            )
+            if mode == "stochastic":
+                ems_kwargs.update(copula_model=copula_model, n_realizations=cfg["n_realizations"],
+                                  seed=cfg.get("seed", 42) + idx + 1)
 
-        # Save final results
-        collected_result_df.to_csv(os.path.join(saved_path, f'collected_rolling_result.csv'), index=False)
-        collected_one_day_rolling_result_df.to_csv(os.path.join(saved_path, f'one_day_rolling_result.csv'), index=False)
-        print(f"Optimization completed and results saved at time {datetime.now()}.")
-        # print in hour:minute:second format
-        end_time = datetime.now()
-        total_time = end_time - start_time
-        total_seconds = int(total_time.total_seconds())
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        print(f"Total optimization time: {hours}:{minutes:02}:{seconds:02}")
-    elif solve_mode == 'plot':
-        pass
+            t0 = time.time()
+            prob, result_df, fval, exit_flag = RE100EMS(**ems_kwargs).optimize(solver=cp.GUROBI)
+            plan = prob.var_dict["u_normXnongreen_block"].value.reshape(-1)
 
-    
-            
-        
-    
+            fixed_status = None
+            if idx >= WARMUP_DAYS:
+                votes = [plan[0]] + [plan_history[idx - lead][lead] for lead in range(1, LOOKBACK_N)]
+                fixed_status = int(VOTE_WEIGHTS @ votes > CONSENSUS_THRESHOLD)
+                prob, result_df, fval, exit_flag = RE100EMS(**ems_kwargs, fixed_1st_day_nongreen_status=fixed_status).optimize(solver=cp.GUROBI)
+                plan = prob.var_dict["u_normXnongreen_block"].value.reshape(-1)
+            plan_history.append(plan)
+            init_soc = float(prob.var_dict["soc"].value[n_points_1day, 0])
+
+            # Real-time recourse on measured data -> DA/RT costs
+            result_df = RE100EMS.adjust_RT_results_df(result_df, n_points_1hour=n_points_1day // 24, mode=mode)
+            slack_green = prob.var_dict.get("slack_green")
+            result_df["n_RE_days"] = n_RE_days
+            result_df["planning_date"] = planning_date
+            result_df["fixed_1st_day_nongreen_status"] = fixed_status
+            result_df["budget_kwh"] = green_quota[0]
+            result_df["slack_green_kwh"] = float(slack_green.value[0]) if slack_green is not None else 0.0
+            result_df.to_csv(full_path, mode="a", header=not os.path.exists(full_path), index=False)
+            result_df.iloc[:n_points_1day].to_csv(one_day_path, mode="a", header=not os.path.exists(one_day_path), index=False)
+            print(f"[{mode}, {n_RE_days} RE days] {planning_date} ({idx + 1}/{len(planning_dates)}): "
+                  f"fval={fval:.2f}, status={exit_flag}, fixed_1st_day={fixed_status}, "
+                  f"next SoC={init_soc:.2f}, time={time.time() - t0:.1f}s", flush=True)
+
+        one_day_df = pd.read_csv(one_day_path)
+        print(f"[{mode}, {n_RE_days} RE days] done in {time.time() - t_start:.1f}s, "
+              f"total net cost = {one_day_df['net_cost'].sum():.2f} THB, "
+              f"green = {one_day_df[['Pgreen_DA', 'Pgreen_RT']].sum().sum() * resolution_in_hour:.1f} kWh, "
+              f"non-green = {one_day_df[['Pnongreen_DA', 'Pnongreen_RT']].sum().sum() * resolution_in_hour:.1f} kWh")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--optimization_configs_path", type=str, default="./configs/prescient_rolling_configs.json", help="path to optimization configs")
-    parser.add_argument("--continue_planning", type=bool, default=False, help="whether to continue planning from existing results")
-    parser.add_argument("--solve_mode", type=str, default="optimize", help="optimize or plot")
-    parser.add_argument("--saved_path", type=str, default="./results/prescient_rolling", help="path to save results")
+    parser.add_argument("--optimization_configs_path", type=str, default="./configs/stochastic_rolling_configs.json", help="path to optimization configs")
+    parser.add_argument("--saved_path", type=str, default="./results/stochastic_rolling", help="path to save results")
+    parser.add_argument("--n_RE_days", type=int, nargs="+", default=list(range(1, 8)), help="targeted CF days per horizon to sweep")
+    parser.add_argument("--start_planning_date", type=str, default=None, help="override the config's start_planning_date")
+    parser.add_argument("--end_planning_date", type=str, default=None, help="override the config's end_planning_date")
     args = parser.parse_args()
     main(args)

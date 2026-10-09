@@ -9,9 +9,7 @@ import datetime
 import math
 import cvxpy as cp
 from typing import List, Tuple, Optional
-
-from pydantic import constr
-from regex import F
+from src.copula import DailyCopulaErrorModel
 
 class BatteryParams:
     """
@@ -137,7 +135,7 @@ class ForecastData:
         Get forecasted irradiance data for the specified planning time.
         
         Args:
-            planning_date (str): Planning time in any format of original
+            planning_date (str): Planning time in any format of original data.
         """
         return self._exp_ir_df.loc[planning_date].clip(lower=0).to_numpy()
 
@@ -146,85 +144,11 @@ class ForecastData:
         Get forecasted load data for the specified planning time.
 
         Args:
-            planning_date (str): Planning time in any format of original
+            planning_date (str): Planning time in any format of original data.
         """
         return self._exp_load_df.loc[planning_date].clip(lower=0).to_numpy()
 
-    def get_ir_realizations(self, planning_date: str, ir_error_mean: np.ndarray,ir_error_cov: np.ndarray, n_realizations: int, seed: int=42) -> pd.Series:
-        """
-        Get realized irradiance data for the specified planning time separately.
-
-        Args:
-            planning_date (str): Planning time in any format of original
-            ir_error_mean (np.ndarray): Error mean vector for irradiance with dimension (forecast_steps,). 1D array.
-            ir_error_cov (np.ndarray): Error covariance matrix for irradiance with dimension (forecast_steps, forecast_steps).
-
-        Returns:
-            np.ndarray: realizations of irradiance data with shape (n_realizations, forecast_steps).
-        """
-        # Get the deterministic forecasted irradiance as mean
-        forecasted_ir = self.get_forecasted_ir(planning_date)
-        
-        # Get the error realizations
-        np.random.seed(seed)
-        error_realizations = np.random.multivariate_normal(ir_error_mean, ir_error_cov, size=n_realizations)
-        
-        # Add the error realizations to the deterministic forecast
-        ir_realizations = forecasted_ir[None, :] + error_realizations
-
-        return ir_realizations.clip(min=0)
-
-    def get_pl_realizations(self, planning_date: str, pl_error_mean: np.ndarray,pl_error_cov: np.ndarray, n_realizations: int, seed: int=42) -> pd.Series:
-        """
-        Get realized load data for the specified planning time separately.
-
-        Args:
-            planning_date (str): Planning time in 'YYYY-MM-DD HH:MM:SS' format.
-            pl_error_mean (np.ndarray): Error mean vector for load with dimension (forecast_steps,). 1D array.
-            pl_error_cov (np.ndarray): Error covariance matrix for load with dimension (forecast_steps, forecast_steps).
-
-        Returns:
-            np.ndarray: realizations of load data with shape (n_realizations, forecast_steps).
-        """
-        # Get the deterministic forecasted load as mean
-        forecasted_pl = self.get_forecasted_load(planning_date)
-        
-        # Get the error realizations
-        np.random.seed(seed)
-        error_realizations = np.random.multivariate_normal(pl_error_mean, pl_error_cov, size=n_realizations)
- 
-        # Add the error realizations to the deterministic forecast
-        pl_realizations = forecasted_pl[None, :] + error_realizations
-    
-        return pl_realizations.clip(min=0)
-
-    def get_ir_pl_realizations(self, planning_date: str, ir_pl_error_cov: np.ndarray, ir_pl_error_mean: np.ndarray, n_realizations: int, seed: int=42) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Get realized irradiance and load data for the specified planning time together from stack
-
-        Args:
-            planning_date (str): Planning time in 'YYYY-MM-DD HH:MM:SS' format.
-            ir_pl_error_cov (np.ndarray): Error covariance matrix for irradiance and load with dimension (2*forecast_steps, 2*forecast_steps).
-            ir_pl_error_mean (np.ndarray): Error mean vector for irradiance and load with dimension (2*forecast_steps,). 1D array.
-            n_realizations (int): Number of realizations to generate.
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: realizations of irradiance and load data with shape (n_realizations, forecast_steps).
-        """
-        # Get the deterministic forecasted irradiance and load as mean
-        forecasted_ir = self.get_forecasted_ir(planning_date)
-        forecasted_pl = self.get_forecasted_load(planning_date)
-        # assert the dimension of deterministic forecasted data
-        assert len(forecasted_ir) == len(forecasted_pl), "The dimension of forecasted_ir and forecasted_pl must be the same."
-        # Get the error realizations
-        np.random.seed(seed)
-        error_realizations = np.random.multivariate_normal(
-            ir_pl_error_mean, ir_pl_error_cov, size=n_realizations)
-
-        ir_realizations = forecasted_ir[None, :] + error_realizations[:, :len(forecasted_ir)]
-        pl_realizations = forecasted_pl[None, :] + error_realizations[:, len(forecasted_ir):]
-
-        return ir_realizations.clip(min=0), pl_realizations.clip(min=0)
+  
     
     
     
@@ -241,22 +165,23 @@ class RE100EMS:
                  n_horizon_days: int=7,
                  PV_cap_original: float=4,
                  PV_cap_target: float=30,
-                 n_RE_days: int=4,
+                #  n_RE_days: int=4,
+                CFE_block_size: int=96,
+                n_CFE_blocks: int=4, # instead of n_horizon_days, we use n_CFE_blocks to define the number of CFE blocks in the optimization horizon
+                batt_1st_block_size: int=96,
                  smooth_charge_factor: float=1,
                   terminal_socs: List[float]=None,
                   weight_hourly_cons: int=1,
                   weight_charge_batt: int=None,
                     weight_smooth_charge: int=None,
+                fixed_1st_day_nongreen_status: int=None,
                  n_realizations: int=None,
-                 n_green_sources: int=1,
+                 copula_model: DailyCopulaErrorModel=None,
                  seed: int=42,
-                 green_allocation_quota: List[float]=[np.inf], # kWh per month
-                 ir_error_cov: np.ndarray=None,
-                pl_error_cov: np.ndarray=None,
-                ir_error_mean: np.ndarray=None,
-                    pl_error_mean: np.ndarray=None,
-                    ir_pl_error_cov: np.ndarray=None,
-                    ir_pl_error_mean: np.ndarray=None,
+                 n_green_sources: int=1,
+                 green_allocation_quota: List[float]=[np.inf], # kWh 
+                 weight_green_slack: int=None,
+
                     extract_realizations: list=None, # [1, 23] some specific scenario indices to be extracted
                  mode: str='deterministic'):
         
@@ -303,56 +228,14 @@ class RE100EMS:
             if n_realizations is None or n_realizations <= 0:
                 raise ValueError("n_realizations must be a positive integer for stochastic mode.")
             self.n_realizations = n_realizations
+            self.copula_model: Optional[DailyCopulaErrorModel] = copula_model
+            
+            pv_error_scenarios = self.copula_model.get_pv_error_scenarios(num_scenarios=n_realizations, n_horizon_days=n_horizon_days, base_seed=seed)
+            load_error_scenarios = self.copula_model.get_load_error_scenarios(num_scenarios=n_realizations, n_horizon_days=n_horizon_days, base_seed=seed)
+            self.pv_realizations = np.clip(self.forecasted_PV.reshape(1, -1) + pv_error_scenarios, a_min=0, a_max=None)
+            self.pl_realizations = np.clip(self.forecasted_PL.reshape(1, -1) + load_error_scenarios, a_min=0, a_max=None)
 
-            if ir_pl_error_cov is not None and ir_pl_error_mean is not None:
-                # assert the dimension of ir_pl_error_cov and ir_pl_error_mean
-                assert ir_pl_error_cov.shape[0] == ir_pl_error_cov.shape[1], "The ir_pl_error_cov must be a square matrix."
-                assert ir_pl_error_cov.shape[0] == len(self.forecasted_ir)*2, "The dimension of ir_pl_error_cov must be 2 times the length of forecasted_ir."
-                assert len(ir_pl_error_mean) == len(self.forecasted_ir)*2, "The length of ir_pl_error_mean must be 2 times the length of forecasted_ir."
-                self.ir_pl_error_cov = ir_pl_error_cov
-                self.ir_pl_error_mean = ir_pl_error_mean
-                self.ir_realizations, self.pl_realizations = forecast_data.get_ir_pl_realizations(
-                    planning_date=self.planning_date.strftime('%Y-%m-%d'),
-                    ir_pl_error_cov=self.ir_pl_error_cov,
-                    ir_pl_error_mean=self.ir_pl_error_mean,
-                    n_realizations=self.n_realizations,
-                    seed=seed
-                    )
-                
-                self.pv_realizations =  self.alpha[None, :] * self.ir_realizations/ PV_cap_original * PV_cap_target
-                print("Using stacked ir and pl error covariance matrix to generate scenarios.")
-            elif ir_error_cov is not None and ir_error_mean is not None and pl_error_cov is not None and pl_error_mean is not None:
-                # assert the dimension of ir_error_cov and ir_error_mean
-                assert ir_error_cov.shape[0] == ir_error_cov.shape[1], "The ir_error_cov must be a square matrix."
-                assert ir_error_cov.shape[0] == len(self.forecasted_ir), "The dimension of ir_error_cov must be the length of forecasted_ir."
-                assert len(ir_error_mean) == len(self.forecasted_ir), "The length of ir_error_mean must be the length of forecasted_ir."
-                self.ir_error_cov = ir_error_cov
-                self.ir_error_mean = ir_error_mean
-
-                # assert the dimension of pl_error_cov and pl_error_mean
-                assert pl_error_cov.shape[0] == pl_error_cov.shape[1], "The pl_error_cov must be a square matrix."
-                assert pl_error_cov.shape[0] == len(self.forecasted_PL), "The dimension of pl_error_cov must be the length of forecasted_PL."
-                assert len(pl_error_mean) == len(self.forecasted_PL), "The length of pl_error_mean must be the length of forecasted_PL."
-                self.pl_error_cov = pl_error_cov
-                self.pl_error_mean = pl_error_mean
-
-                self.ir_realizations = forecast_data.get_ir_realizations(
-                    planning_date=self.planning_date.strftime('%Y-%m-%d'),
-                    ir_error_cov=self.ir_error_cov,
-                    ir_error_mean=self.ir_error_mean,
-                    n_realizations=self.n_realizations,
-                    seed=seed
-                    )
-                self.pv_realizations = self.alpha[None, :] * self.ir_realizations / PV_cap_original * PV_cap_target
-                
-                self.pl_realizations = forecast_data.get_pl_realizations(
-                    planning_date=self.planning_date.strftime('%Y-%m-%d'),
-                    pl_error_cov=self.pl_error_cov,
-                    pl_error_mean=self.pl_error_mean,
-                    n_realizations=self.n_realizations,
-                    seed=seed)
-            else:
-                raise ValueError("Either ir_pl_error_cov and ir_pl_error_mean or ir_error_cov, ir_error_mean, pl_error_cov, pl_error_mean must be provided for stochastic mode.")
+            
                 
 
         # Get buy and sell rates based on TOU tariffs
@@ -375,12 +258,19 @@ class RE100EMS:
         self.weight_hourly_cons: Optional[int] = weight_hourly_cons
         self.weight_charge_batt: Optional[int] = weight_charge_batt  
         self.weight_smooth_charge: Optional[int] = weight_smooth_charge
+        self.weight_green_slack: Optional[int] = weight_green_slack
         self.terminal_socs: Optional[np.ndarray] = terminal_socs
-        self.n_RE_days: Optional[int] = n_RE_days
+        # self.n_RE_days: Optional[int] = n_RE_days
+        self.CFE_block_size: Optional[int] = CFE_block_size
+        self.n_CFE_blocks: Optional[int] = n_CFE_blocks
+        self.n_total_blocks: Optional[int] = math.ceil(n_horizon_days * n_points_1day / CFE_block_size)
+        self.batt_1st_block_size: Optional[int] = batt_1st_block_size
         self.extract_realizations: Optional[list] = extract_realizations
 
         self.smooth_charge_factor = smooth_charge_factor
+        
         self.mode = mode
+        self.fixed_1st_day_nongreen_status: Optional[int] = fixed_1st_day_nongreen_status
     
     def _get_buy_sell_rate_planning(self, rate_choice) -> Tuple[np.ndarray, np.ndarray]:
         rate_df = pd.DataFrame({'Datetime': self.target_dt})
@@ -394,8 +284,8 @@ class RE100EMS:
         if row.empty:
             raise ValueError(f"Rate choice '{rate_choice}' not found in price_df")
 
-        buy_rate = float(row['buy_dayahead'])
-        sell_rate = float(row['sell_dayahead'])
+        buy_rate = float(row['buy_dayahead'].iloc[0])
+        sell_rate = float(row['sell_dayahead'].iloc[0])
 
         rate_df['buy'] = buy_rate
         rate_df['sell'] = sell_rate
@@ -413,8 +303,8 @@ class RE100EMS:
         if row.empty:
             raise ValueError(f"Rate choice '{rate_choice}' not found in price_df")
 
-        buy_rate = float(row['buy_realtime'])
-        sell_rate = float(row['sell_realtime'])
+        buy_rate = float(row['buy_realtime'].iloc[0])
+        sell_rate = float(row['sell_realtime'].iloc[0])
 
         rate_df['buy'] = buy_rate
         rate_df['sell'] = sell_rate
@@ -444,6 +334,8 @@ class RE100EMS:
         n_points_1hour = int(1 / resolution_in_hour)
         n_hourly_blocks = int(n_horizon_hours/self.weight_hourly_cons)
         n_green_sources = self.n_green_sources
+        n_total_blocks = self.n_total_blocks
+        n_CFE_blocks = self.n_CFE_blocks
         
         # Define decision variables
         Pnet = cp.Variable(length_optimvar, name='Pnet')
@@ -468,7 +360,7 @@ class RE100EMS:
         x_dchg    = cp.Variable((length_optimvar, no_batts), integer=True, name='x_dchg')
         
         # Integer decision variables for grid status (using Big-M formulation later)
-        u_normXnongreen1day = cp.Variable(n_horizon_days, integer=True, name='normXnongreen1Day')
+        u_normXnongreen_block = cp.Variable(n_total_blocks, integer=True, name='u_normXnongreen_block')
         u_hourly_green_sources = cp.Variable(n_hourly_blocks, integer=True, name='u_hourly_green_sources')
         u_green_sources = cp.Variable(length_optimvar, integer=True, name='u_green_sources')
         x_hourly_green = cp.Variable((n_hourly_blocks, n_green_sources), integer=True, name='x_hourly_green')
@@ -495,13 +387,33 @@ class RE100EMS:
         if self.weight_smooth_charge is not None:
             total_obj += self.weight_smooth_charge*cp.sum(Pdchg[1:, :] - Pdchg[:-1, :])/self.battery.max_discharge_rates
         
-        M: float = 500  # Big-M constant for constraints
+        # --- Reduced Big-M (patched) ---------------------------------------
+        # Previously a flat scalar (M=500), which produces a ~290x gap between
+        # the LP relaxation and the MILP optimum when slack_green is active
+        # and binding (see solve-time diagnosis). Matches the per-timestep
+        # formula already used in _stochastic_optimization:
+        #     M(t) = Net load(t) + max charge rate
+        # For 'prescient' mode, net load uses the MEASURED PL/PV (perfect
+        # foresight). For 'deterministic' mode, net load uses the FORECASTED
+        # PL/PV (the same series used in the Pnet power-balance constraint
+        # a few lines below), so M(t) is only ever as loose as the net load
+        # value that constraint actually needs to support at each t.
+        if self.mode == 'prescient':
+            _netload_for_M = self.meas_PL - self.meas_PV
+        elif self.mode == 'deterministic':
+            _netload_for_M = self.forecasted_PL - self.forecasted_PV
+        else:
+            raise ValueError(f"Unsupported mode for Big-M computation: {self.mode}")
+        M = _netload_for_M + np.max(self.battery.max_charge_rates) + 1e-3  # shape (length_optimvar,)
+        assert np.ndim(M) == 1 and M.shape[0] == length_optimvar, \
+            f"M should be a vector of shape (length_optimvar,), got shape {np.shape(M)}"
+        # ---------------------------------------------------------------------
         
         # Initialize constraints list
         constraints = []
         # Integer variable constraints (ensuring binary values 0 or 1)
-        constraints.append(u_normXnongreen1day >= 0)
-        constraints.append(u_normXnongreen1day <= 1)
+        constraints.append(u_normXnongreen_block >= 0)
+        constraints.append(u_normXnongreen_block <= 1)
         constraints.append(u_hourly_green_sources >= 0)
         constraints.append(u_hourly_green_sources <= 1)
         constraints.append(x_hourly_nongreen >= 0)
@@ -542,8 +454,12 @@ class RE100EMS:
                 constraints.append(x_green[start_idx:end_idx, g] == x_hourly_green[h, g]) # shape (length_optimvar, n_green_sources) element-wise
         
         # Big-M constraints to link power variables with binary variables
-        constraints.append(Pgreen <= M * x_green)  # shape (length_optimvar, n_green_sources) element-wise
-        constraints.append(Pnongreen <= M * x_nongreen)  # shape (length
+        # M is a vector of shape (length_optimvar,); broadcast explicitly
+        # across the n_green_sources columns of Pgreen/x_green rather than
+        # relying on bare `M * x_green` (only valid when M was a scalar).
+        M_col = np.tile(M.reshape(-1, 1), (1, n_green_sources))  # shape (length_optimvar, n_green_sources)
+        constraints.append(Pgreen <= cp.multiply(M_col, x_green))  # shape (length_optimvar, n_green_sources) element-wise
+        constraints.append(Pnongreen <= cp.multiply(M, x_nongreen))  # shape (length_optimvar,) element-wise
 
         EPSILON_POS: float = 1e-5  # Small constant to avoid numerical issues
         constraints.append(Pgreen >= EPSILON_POS * x_green)  # shape (length_optimvar, n_green_sources) element-wise
@@ -554,8 +470,15 @@ class RE100EMS:
         constraints.append(x_green <= cp.reshape(u_green_sources, (length_optimvar, 1))) # shape (length_optimvar, n_green_sources) element-wise
         
         
-        # Each imported green source must not exceed the green allocation quota which should convert to kWh in the optimization
-        constraints.append(cp.sum(Pgreen, axis=0) * resolution_in_hour <= self.green_allocation_quota)
+        # Each imported green source must not exceed the green allocation quota which should convert to kWh in the optimization.
+        # If weight_green_slack is set, make this a SOFT cap (slack_green, penalized in the objective) instead of a
+        # hard cap -- mirrors the mechanism in _stochastic_optimization so both solvers can share the same weight.
+        if self.weight_green_slack is not None:
+            slack_green = cp.Variable(1, nonneg=True, name='slack_green')
+            constraints.append(cp.sum(Pgreen, axis=0) * resolution_in_hour <= self.green_allocation_quota + slack_green)
+            total_obj += self.weight_green_slack * slack_green
+        else:
+            constraints.append(cp.sum(Pgreen, axis=0) * resolution_in_hour <= self.green_allocation_quota)
         
         # Battery charging and discharging rate limits
         constraints.append(Pchg<= self.battery.max_charge_rates * x_chg)
@@ -589,17 +512,20 @@ class RE100EMS:
             
             
         
-        # Limit the number of days with nongreen usage
-        for day in range(n_horizon_days):
-            bh = int(day * n_hourly_blocks / n_horizon_days)
+        # Limit the number of CFE blocks with nongreen usage
+        for block in range(1, n_total_blocks + 1):
+            start_idx = (block - 1) * self.CFE_block_size
+            end_idx = block * self.CFE_block_size
+            constraints.append(x_nongreen[start_idx:end_idx] <= u_normXnongreen_block[block - 1])
 
-            eh = int((day + 1) * n_hourly_blocks / n_horizon_days)
-            constraints += [
-                x_hourly_nongreen[bh:eh] <= u_normXnongreen1day[day],
-                # no need for the negative lower bound; you already bound binaries in [0,1]
-            ]
-            
-        constraints.append(cp.sum(u_normXnongreen1day) <= n_horizon_days - self.n_RE_days)
+        constraints.append(cp.sum(u_normXnongreen_block) <= n_total_blocks - n_CFE_blocks)
+
+        if self.fixed_1st_day_nongreen_status is not None:
+            constraints.append(u_normXnongreen_block[0] == self.fixed_1st_day_nongreen_status)
+        
+        
+        # if self.fixed_1st_day_nongreen_status is not None:
+        #     constraints.append(u_normXnongreen1day[0] == self.fixed_1st_day_nongreen_status)
         
         # Define the overall optimization problem
         prob = cp.Problem(cp.Minimize(total_obj), constraints)
@@ -613,41 +539,42 @@ class RE100EMS:
         assert np.all(Pnongreen.value <= M * x_nongreen.value + 1e-3), "Pnongreen exceeds Big-M limit"
 
         # Collect the solution into a DataFrame
-        result_df = pd.DataFrame({
+        result_df_data = {
             'Datetime': self.target_dt,
             'measured_PL': self.meas_PL,
             'measured_PV': self.meas_PV,
             'measured_Netload': self.meas_PL - self.meas_PV,
             'forecasted_PL': self.forecasted_PL,
-            'forecasted_PV':self.forecasted_PV,
+            'forecasted_PV': self.forecasted_PV,
             'forecasted_Netload': self.forecasted_PL - self.forecasted_PV,
             'Pnet_DA': Pnet.value,
             'posPnet_DA': posPnet.value,
-            'negPnet_DA': negPnet.value} | 
-            {f'Pgreen_UGT{idx+1}_DA': Pgreen.value[:, idx] for idx in range(n_green_sources)} |
-            {'Pgreen_DA': np.sum(Pgreen.value, axis=1),}|
-            {f'x_green_UGT{idx+1}_DA': x_green.value[:, idx] for idx in range(n_green_sources)} |
-            {'x_green_DA' : np.max(x_green.value, axis=1)} |
-            {'Pnongreen_DA': Pnongreen.value,
-             'x_nongreen_DA': x_nongreen.value,
-             'daily_u_normXnongreen1day': np.kron(u_normXnongreen1day.value.reshape(-1,), np.ones((self.n_points_1day))).flatten(),
-             'x_chg': x_chg.value[:, 0].flatten(),
-             'x_dchg': x_dchg.value[:, 0].flatten(),
-             'Pdchg': np.sum(Pdchg.value, axis=1),
-             'Pchg': np.sum(Pchg.value, axis=1),
-             'soc': soc.value[:-1, 0],
-             'Pnet_RT': (self.meas_PL - self.meas_PV + np.sum(Pchg.value, axis=1) - np.sum(Pdchg.value, axis=1)                      
-                                 +negPnet.value - np.sum(Pgreen.value, axis=1) - Pnongreen.value), # Calculate mismatch power in realtime
-                'TOU_PLANNING_BUY_RATE': self.TOU_PLANNING_BUY_RATE,
-                'TOU_PLANNING_SELL_RATE': self.TOU_PLANNING_SELL_RATE,
-                'TOU_RT_BUY_RATE': self.TOU_RT_BUY_RATE,
-                'TOU_RT_SELL_RATE': self.TOU_RT_SELL_RATE,} |
-            {f"UGT{idx+1}_PLANNING_BUY_RATE": UGT_PLANNING_BUY_RATE_array[:, idx] for idx in range(n_green_sources)} |
-            {f"UGT{idx+1}_PLANNING_SELL_RATE": UGT_PLANNING_SELL_RATE_array[:, idx] for idx in range(n_green_sources)} |
-            {f"UGT{idx+1}_RT_BUY_RATE": UGT_RT_BUY_RATE_array[:, idx] for idx in range(n_green_sources)} |
-            {f"UGT{idx+1}_RT_SELL_RATE": UGT_RT_SELL_RATE_array[:, idx] for idx in range(n_green_sources)}
-            
-        )
+            'negPnet_DA': negPnet.value,
+            'Pgreen_DA': np.sum(Pgreen.value, axis=1),
+            'x_green_DA': np.max(x_green.value, axis=1),
+            'Pnongreen_DA': Pnongreen.value,
+            'x_nongreen_DA': x_nongreen.value,
+            'u_normXnongreen_block': np.kron(u_normXnongreen_block.value.reshape(-1,), np.ones((self.CFE_block_size,))).flatten(),
+            'daily_u_normXnongreen1day': np.kron(u_normXnongreen_block.value.reshape(-1,), np.ones((self.CFE_block_size,))).flatten(),
+            'x_chg': x_chg.value[:, 0].flatten(),
+            'x_dchg': x_dchg.value[:, 0].flatten(),
+            'Pdchg': np.sum(Pdchg.value, axis=1),
+            'Pchg': np.sum(Pchg.value, axis=1),
+            'soc': soc.value[:-1, 0],
+            'Pnet_RT': (self.meas_PL - self.meas_PV + np.sum(Pchg.value, axis=1) - np.sum(Pdchg.value, axis=1)
+                        + negPnet.value - np.sum(Pgreen.value, axis=1) - Pnongreen.value),
+            'TOU_PLANNING_BUY_RATE': self.TOU_PLANNING_BUY_RATE,
+            'TOU_PLANNING_SELL_RATE': self.TOU_PLANNING_SELL_RATE,
+            'TOU_RT_BUY_RATE': self.TOU_RT_BUY_RATE,
+            'TOU_RT_SELL_RATE': self.TOU_RT_SELL_RATE,
+        }
+        result_df_data.update({f'Pgreen_UGT{idx+1}_DA': Pgreen.value[:, idx] for idx in range(n_green_sources)})
+        result_df_data.update({f'x_green_UGT{idx+1}_DA': x_green.value[:, idx] for idx in range(n_green_sources)})
+        result_df_data.update({f'UGT{idx+1}_PLANNING_BUY_RATE': UGT_PLANNING_BUY_RATE_array[:, idx] for idx in range(n_green_sources)})
+        result_df_data.update({f'UGT{idx+1}_PLANNING_SELL_RATE': UGT_PLANNING_SELL_RATE_array[:, idx] for idx in range(n_green_sources)})
+        result_df_data.update({f'UGT{idx+1}_RT_BUY_RATE': UGT_RT_BUY_RATE_array[:, idx] for idx in range(n_green_sources)})
+        result_df_data.update({f'UGT{idx+1}_RT_SELL_RATE': UGT_RT_SELL_RATE_array[:, idx] for idx in range(n_green_sources)})
+        result_df = pd.DataFrame(result_df_data)
         EPSILON = 1e-3
         # Create status column stating whether nongreen imported in the day
 
@@ -700,6 +627,8 @@ class RE100EMS:
         n_horizon_hours = math.ceil((self.target_dt[-1]- self.target_dt[0]).total_seconds() / 3600)
         n_green_sources = self.n_green_sources
         n_realizations = self.n_realizations
+        n_total_blocks = self.n_total_blocks
+        n_CFE_blocks = self.n_CFE_blocks
         
         n_points_1hour = int(1 / resolution_in_hour)
         n_hourly_blocks = int(n_horizon_hours/self.weight_hourly_cons)
@@ -715,6 +644,11 @@ class RE100EMS:
         Pnongreen_DA = cp.Variable((length_optimvar,), nonneg=True, name='Pnongreen_DA')
         P_hourly_sell_DA = cp.Variable((n_hourly_blocks, 1), nonneg=True, name='P_hourly_sell_DA')
         Psell_DA = cp.Variable((length_optimvar,), nonneg=True, name='Psell_DA')
+        if self.weight_green_slack is not None:
+            green_quota = self.green_allocation_quota
+            # introduce slack variable for green quota constraint to allow for some flexibility in the optimization, but huge penalty in the objective function to discourage its use
+            # slack_green = cp.Variable(n_realizations, nonneg=True, name='slack_green')
+            slack_green = cp.Variable(1, nonneg=True, name='slack_green')
         
 
         # just try to create full decision variables without hourly reduction
@@ -731,7 +665,7 @@ class RE100EMS:
         x_dchg    = cp.Variable((length_optimvar, no_batts), integer=True, name='x_dchg')
         
         # Integer decision variables for grid status (using Big-M formulation later)
-        u_normXnongreen1day = cp.Variable(n_horizon_days, integer=True, name='normXnongreen1Day')
+        u_normXnongreen_block = cp.Variable(n_total_blocks, integer=True, name='u_normXnongreen_block')
         x_hourly_green = cp.Variable(n_hourly_blocks, integer=True, name='x_hourly_green')
         x_green = cp.Variable(length_optimvar, integer=True, name='x_green')
         x_hourly_nongreen = cp.Variable(n_hourly_blocks, integer=True, name='x_hourly_nongreen')
@@ -765,14 +699,25 @@ class RE100EMS:
         total_obj = (obj_DA + obj_RT)* resolution_in_hour
 
         
-        M: float = 1e2  # Big-M constant for constraints
-    
+        # M: float = 1e2  # Big-M constant for constraints
+        # use M per timestamp, max net load over scenarios + max charge rate
+        M = np.max(self.pl_realizations - self.pv_realizations, axis=0) + np.max(self.battery.max_charge_rates) + 1e-3  # Big-M constant for constraints
+        # M = np.max(np.abs(self.pl_realizations - self.pv_realizations), axis=0) + np.max(self.battery.max_charge_rates) + 1e-3  # Big-M constant for constraints
+        
+        # print(M)
+        # assert that M has shape (length_optimvar,), but got shape {np.shape(M)}"
+        assert np.ndim(M) == 1 and M.shape[0] == length_optimvar, f"M should be a vector of shape (length_optimvar,), but got shape {np.shape(M)}"
+        # use absolute max net load over scenarios + max charge rate, absolute max net load, size (1,)
+        # M = np.max(self.pl_realizations - self.pv_realizations) + np.max(self.battery.max_charge_rates) + 1e-3  # Big-M constant for constraints
+        # # assert that M is one-dimensional
+        # assert np.ndim(M) == 0, f"M should be a scalar, but got shape {np.shape(M)}"
+
         # Initialize constraints list
         constraints = []
         
         # Integer variable constraints (ensuring binary values 0 or 1)
-        constraints.append(u_normXnongreen1day >= 0)
-        constraints.append(u_normXnongreen1day <= 1)
+        constraints.append(u_normXnongreen_block >= 0)
+        constraints.append(u_normXnongreen_block <= 1)
         constraints.append(x_hourly_green >= 0)
         constraints.append(x_hourly_green <= 1)
         constraints.append(x_hourly_nongreen >= 0)
@@ -805,12 +750,12 @@ class RE100EMS:
             constraints.append(x_nongreen[start_idx:end_idx] == x_hourly_nongreen[h])
         
         # Big-M constraints to link power variables with binary variables
-        constraints.append(Pgreen_DA <= M * x_green)
-        constraints.append(Pnongreen_DA <= M * x_nongreen)
+        constraints.append(Pgreen_DA <= cp.multiply(M, x_green))
+        constraints.append(Pnongreen_DA <= cp.multiply(M, x_nongreen))
 
 
-        constraints.append(Pgreen_RT <= M * x_green.reshape((1, length_optimvar), order='C')) # sum along the green source axis to get shape (n_realizations, length_optimvar)
-        constraints.append(Pnongreen_RT <= M * x_nongreen.reshape((1, length_optimvar), order='C'))
+        constraints.append(Pgreen_RT <= cp.multiply(M, x_green.reshape((1, length_optimvar), order='C'))) # sum along the green source axis to get shape (n_realizations, length_optimvar)
+        constraints.append(Pnongreen_RT <= cp.multiply(M, x_nongreen.reshape((1, length_optimvar), order='C')))
         
         # Impose strictly import either green or nongreen at each time step
         EPSILON_POSITIVE = 1e-5
@@ -822,10 +767,24 @@ class RE100EMS:
 
         # To force that at each time step, only one green source or one nongreen source can be used
         constraints.append(x_green + x_nongreen <= 1)
+        if self.fixed_1st_day_nongreen_status is not None:
+            constraints.append(u_normXnongreen_block[0] == self.fixed_1st_day_nongreen_status)
+        
+        
+        # add green quota constraints with slack variable to allow for some flexibility in the optimization
+        if self.weight_green_slack is not None:
+            total_green_DA = cp.sum(Pgreen_DA) * resolution_in_hour            # scalar, kWh
+            # total_green_RT = cp.sum(Pgreen_RT, axis=1) * resolution_in_hour    # (n_realizations,), kWh
+            # green_quota_constraint = total_green_DA + total_green_RT <= green_quota[0] + slack_green
+            # only DA green quota constraint is considered here, since the RT green power is not known in advance
+            green_quota_constraint = total_green_DA <= green_quota[0] + slack_green
+            constraints.append(green_quota_constraint)
+            total_obj += self.weight_green_slack * slack_green
+        # Add a penalty for the slack s in the
         
         # # Battery charging and discharging rate limits
         constraints.append(Pchg<= self.battery.max_charge_rates * x_chg)    
-        constraints.append(Pdchg<= self.battery.max_discharge_rates * x_dchg)   
+        constraints.append(Pdchg<= self.battery.max_discharge_rates * x_dchg)
         constraints.append(x_chg+x_dchg<=1)
 
         # Force smooth dischrage 
@@ -850,19 +809,13 @@ class RE100EMS:
             constraints.append(soc[end_date_idx_list, :] >= self.terminal_socs)
             constraints.append(soc[-1, :]>=self.terminal_socs)
 
-        # Limit the number of days with nongreen usage
-        for day in range(n_horizon_days):
-            bh = int(day * n_hourly_blocks / n_horizon_days)
+        # Limit the number of CFE blocks with nongreen usage
+        for block in range(1, n_total_blocks + 1):
+            start_idx = (block - 1) * self.CFE_block_size
+            end_idx = block * self.CFE_block_size
+            constraints.append(x_nongreen[start_idx:end_idx] <= u_normXnongreen_block[block - 1])
 
-            eh = int((day + 1) * n_hourly_blocks / n_horizon_days)
-            constraints += [
-                x_hourly_nongreen[bh:eh] <= u_normXnongreen1day[day],
-                # no need for the negative lower bound; you already bound binaries in [0,1]
-            ]
-
-            
-        constraints.append(cp.sum(u_normXnongreen1day) <= n_horizon_days - self.n_RE_days)
-
+        constraints.append(cp.sum(u_normXnongreen_block) <= n_total_blocks - n_CFE_blocks)
 
         
         # Define the overall optimization problem
@@ -876,11 +829,12 @@ class RE100EMS:
         print("Total number of optimization variables:", total_vars)
         # Solve the problem using the specified solver
 
-        sol_status = prob.solve(solver=solver, save_file='stochastic_optimization.lp',)
+        sol_status = prob.solve(solver=solver, verbose=True)
+        # print shadow prices of the green quota constraint
         # Assert if the solver reach optimal
         assert prob.status in ["optimal", "optimal_inaccurate"], f"Solver did not reach optimality, status: {prob.status}"
         # assert np.all(Pnongreen_DA.value <= M * x_nongreen.value + 1e-3), "Pnongreen exceeds Big-M limit"
-        print(f"normXnongreen1day values: {u_normXnongreen1day.value}")
+        print(f"normXnongreen_block values: {u_normXnongreen_block.value}")
          # Collect the solution into a DataFrame
         result_df = pd.DataFrame({
             'Datetime': self.target_dt,
@@ -895,7 +849,8 @@ class RE100EMS:
             'Psell_DA': Psell_DA.value,
             'x_green_DA': x_green.value.flatten(),
             'x_nongreen_DA': x_nongreen.value.flatten(),
-            'daily_u_normXnongreen1day': np.kron(u_normXnongreen1day.value, np.ones((self.n_points_1day))), 
+            'u_normXnongreen_block': np.kron(u_normXnongreen_block.value.reshape(-1,), np.ones((self.CFE_block_size,))).flatten(),
+            'daily_u_normXnongreen1day': np.kron(u_normXnongreen_block.value.reshape(-1,), np.ones((self.CFE_block_size,))).flatten(), 
             'x_chg': x_chg.value[:, 0].flatten(),
             'x_dchg': x_dchg.value[:, 0].flatten(),
             'Pdchg': np.sum(Pdchg.value, axis=1),

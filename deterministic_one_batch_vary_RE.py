@@ -57,7 +57,8 @@ def main(arg):
             n_horizon_days=n_horizon_days,
             PV_cap_original=PV_cap_original,
             PV_cap_target=Pv_cap_target,
-            n_RE_days=n_RE_days,
+            CFE_block_size=n_points_1day,  # one CFE block = one day
+            n_CFE_blocks=n_RE_days,
             price_df=price_df,
             weight_hourly_cons=weight_hourly_cons,
             smooth_charge_factor=smooth_charge_factor,
@@ -109,7 +110,8 @@ def main(arg):
     fig = plot_REdays_net_cost(net_costs=net_costs, figsize=optimization_configs.get("operation_fig_size", (8, 6)),
                                tick_fontsize=optimization_configs.get("tick_fontsize",16),
                                label_fontsize=optimization_configs.get("label_fontsize",16),
-                               title_fontsize=optimization_configs.get("title_fontsize",18))
+                               title_fontsize=optimization_configs.get("title_fontsize",18),
+                               planning_date=planning_date)
     fig.savefig(os.path.join(fig_path, f"plan7day_netcost_varyREdays.pdf"), bbox_inches='tight')
     
 if __name__ == "__main__":

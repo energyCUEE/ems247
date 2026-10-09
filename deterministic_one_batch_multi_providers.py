@@ -55,7 +55,8 @@ def main(arg):
         n_horizon_days=n_horizon_days,
         PV_cap_original=PV_cap_original,
         PV_cap_target=Pv_cap_target,
-        n_RE_days=n_RE_days,
+        CFE_block_size=n_points_1day,  # one CFE block = one day
+        n_CFE_blocks=n_RE_days,
         smooth_charge_factor=smooth_charge_factor,
         price_df=price_df,
         n_green_sources=n_green_sources,

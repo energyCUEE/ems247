@@ -7,17 +7,16 @@
     "Pv_cap_target": 15,
     "n_horizon_days": 7,
     "terminal_socs": [40],
-    "weight_hourly_cons": 1,
-    "n_green_sources": 1,
-    "green_allocation_quota": [1000000],
+    "green_purchase_volume_factor": 0.7,
+    "weight_green_slack": 20,
     "n_realizations": 20,
     "seed": 42,
     "battery_configs_path": "./configs/1batt_100kWh_configs.json",
-    "price_df_path":"./configs/price.csv",
+    "price_df_path": "./configs/price.csv",
     "solar_measurement_df_path": "./data/experiment_solar_data.csv",
     "load_measurement_df_path": "./data/experiment_load_data.csv",
     "solar_experiment_df_path": "./selected_models/best_models/IR/45b79af31b4d45e4b03f934eb5bb2ea5/artifacts/tables/test_exp_result.csv",
     "load_experiment_df_path": "./selected_models/best_models/PL/9072c9181a1842b59b5ed8e204111e31/artifacts/tables/test_exp_result.csv",
-    "ir_pl_error_mean_path": "./mat/ir_pl_error_mean.npy",
-    "ir_pl_error_cov_path": "./mat/projected_stacked_error_cov_admm_best_model.npy"
-    }
+    "pv_copula_pipeline_path": "./mat/copula/pv_copula_pipeline.joblib",
+    "load_copula_pipeline_path": "./mat/copula/load_copula_pipeline.joblib"
+}
